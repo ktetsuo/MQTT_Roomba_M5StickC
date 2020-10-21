@@ -33,6 +33,7 @@ float yaw   = 0.0F;
 boolean sending = false;
 unsigned long lastUpdateTime = 0;
 int lastWiFiStatus;
+byte oimode = Roomba::OI_OFF;
 
 void setup() {
   M5.begin();
@@ -47,6 +48,7 @@ void setup() {
   Serial.begin(115200);
   Serial1.begin(115200, SERIAL_8N1, 0, 26); // EXT_IO
   roomba.start();
+  oimode = Roomba::OI_PASSIVE;
   WiFi.begin(ssid, password);
   WiFi.begin();
   lastWiFiStatus = WiFi.status();
@@ -78,16 +80,16 @@ void loop() {
     // 即送信する
     mqttClient.publish("roomba/out/ButtonA", "Pressed");
     roomba.start();
+    oimode = Roomba::OI_PASSIVE;
     pressms = millis();
   }
   // ボタンAが離されたら
   if (M5.BtnA.wasReleased()) {
     // 即送信する
     mqttClient.publish("roomba/out/ButtonA", "Released");
-    if(millis() - pressms >= 2000) {
+    if (millis() - pressms >= 2000) {
       roomba.stop(); // 長押しで操作モード終了
-    } else {
-      roomba.full(); // 単押しでフルコントロールモード
+      oimode = Roomba::OI_OFF;
     }
   }
   if (Serial.available() > 0) {
@@ -125,45 +127,64 @@ void loop() {
         Serial.println("motor back");
         roomba.driveDirect(-200, -200);
         break;
-      case '9': // get bumper sensors
-        //        Serial.println("get bumper sensors");
-        //        roomba.getBumperSensors();
+      case '9': // dock
+        Serial.println("seek dock");
+        roomba.seekDock();
         break;
       default:
         break;
     }
   }
   static unsigned long lastsensorms = 0;
-  if (t - lastsensorms >= 200) {
+  if (t - lastsensorms >= 100) {
     lastsensorms = t;
-    byte oimode = roomba.getOIMode();
-    if (!roomba.isTimeoutError()) {
-      Serial.print("oimode: ");
-      Serial.println(oimode);
-    }
-    static byte lastBumps = 0;
-    static byte lastDrops = 0;
-    byte bumpsdrops = roomba.getBumpsAndWheelDrops();
-    if (!roomba.isTimeoutError()) {
-      byte bumps = bumpsdrops & Roomba::BUMP_MASK;
-      byte drops = (bumpsdrops & Roomba::DROP_MASK) >> 2;
-      Serial.print("bumps: ");
-      Serial.println(bumps);
-      Serial.print("drops: ");
-      Serial.println(drops);
-      if (bumps != lastBumps) {
-        lastBumps = bumps;
-        mqttClient.publish("roomba/out/bumps", String(bumps).c_str());
+    if (oimode != Roomba::OI_OFF) {
+      oimode = roomba.getOIMode();
+      if (!roomba.isTimeoutError()) {
+        Serial.print("oimode: ");
+        Serial.print(oimode);
       }
-      if (drops != lastDrops) {
-        lastDrops = drops;
-        mqttClient.publish("roomba/out/drops", String(drops).c_str());
+      static byte lastBumps = 0;
+      static byte lastDrops = 0;
+      byte bumpsdrops = roomba.getBumpsAndWheelDrops();
+      if (!roomba.isTimeoutError()) {
+        byte bumps = bumpsdrops & Roomba::BUMP_MASK;
+        byte drops = (bumpsdrops & Roomba::DROP_MASK) >> 2;
+        Serial.print(", bumps: ");
+        Serial.print(bumps);
+        Serial.print(", drops: ");
+        Serial.println(drops);
+        if (bumps != lastBumps) {
+          lastBumps = bumps;
+          mqttClient.publish("roomba/out/bumps", String(bumps).c_str());
+        }
+        if (drops != lastDrops) {
+          lastDrops = drops;
+          mqttClient.publish("roomba/out/drops", String(drops).c_str());
+        }
+      } else {
+        Serial.println("");
       }
     }
   }
+  // 受信データの読み飛ばし
   if (Serial1.available() > 0) {
-    int c = Serial1.read();
-    Serial.println(c);
+    char buf[256];
+    int n = 0;
+    while (Serial1.available() > 0) {
+      int n = Serial1.available();
+      if (n >= 256) {
+        n = 255;
+      }
+      Serial1.readBytes(buf, n);
+      buf[n] = 0;
+      Serial.print(buf);
+      delay(10);
+    }
+    // 最後が改行でない場合だけ改行を付加する
+    if(n > 0 && buf[n - 1] != '¥n') {
+      Serial.println("");
+    }
   }
 }
 
@@ -275,28 +296,28 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   }
   if (t.equals("mainbrush")) {
     if (p.equals("on")) {
-      roomba.full();
+      checkOIFull();
       roomba.mainBrushOn();
     } else if (p.equals("off")) {
-      roomba.full();
+      checkOIFull();
       roomba.mainBrushOff();
     }
   }
   if (t.equals("sidebrush")) {
     if (p.equals("on")) {
-      roomba.full();
+      checkOIFull();
       roomba.sideBrushOn();
     } else if (p.equals("off")) {
-      roomba.full();
+      checkOIFull();
       roomba.sideBrushOff();
     }
   }
   if (t.equals("vacuum")) {
     if (p.equals("on")) {
-      roomba.full();
+      checkOIFull();
       roomba.vacuumOn();
     } else if (p.equals("off")) {
-      roomba.full();
+      checkOIFull();
       roomba.vacuumOff();
     }
   }
@@ -312,7 +333,21 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     }
     if (p.equals("stop")) {
       roomba.full(); // CleanやSeekDockを止めるため
+      delay(100);
       roomba.stop();
     }
   }
+}
+
+void checkOIFull() {
+    if (oimode != Roomba::OI_FULL) {
+      roomba.full();
+      delay(100);
+    }
+}
+void checkOISafe() {
+    if (oimode != Roomba::OI_SAFE) {
+      roomba.safe();
+      delay(100);
+    }
 }
