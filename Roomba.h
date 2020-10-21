@@ -109,7 +109,7 @@ class Roomba {
       OI_OFF = 0,
       OI_PASSIVE = 1,
       OI_SAFE = 2,
-      OI_FILL = 3,
+      OI_FULL = 3,
     };
     byte getOIMode() {
       _timeouterror = false;
@@ -166,7 +166,7 @@ class Roomba {
     boolean getChargerAvailable() {
       _timeouterror = false;
       _stream.write(142); // Sensor
-      _stream.write(22); // Charging Sources Available
+      _stream.write(34); // Charging Sources Available
       return readUINT8() != 0;
     }
   private:
