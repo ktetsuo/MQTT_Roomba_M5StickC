@@ -1,6 +1,8 @@
 #include <M5StickC.h>
 #include <WiFi.h>
 #include <PubSubClient.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/timers.h>
 
 #include "Roomba.h"
 
@@ -10,10 +12,10 @@ const char password[] = "";
 WiFiClient wifiClient;
 
 // MQTT 設定
-const char* mqttBrokerAddr = "tailor.cloudmqtt.com";
+const char* mqttBrokerAddr = "";
 const char* mqttUserName = "";
 const char* mqttPassword = "";
-const int mqttPort = 11333;
+const int mqttPort = 1883;
 const char* mqttClientID = "Roomba";
 PubSubClient mqttClient(mqttBrokerAddr, mqttPort, wifiClient);
 
@@ -54,13 +56,34 @@ void setup() {
   lastWiFiStatus = WiFi.status();
   Serial.println();
   mqttClient.setCallback(mqttCallback);
+
+  // 別タスクの起動
+  xTaskCreatePinnedToCore(task0, "Task0", 4096, NULL, 1, NULL, 0);
+
+}
+
+// MQTTの再接続に時間がかかるみたいなので、別タスクで動かす
+void task0(void* param)
+{
+  while (true) {
+    if (checkWifi()) {
+      if (checkMQTT()) {
+//        M5.dis.drawpix(0, 0x0000ff);  // WIFI,MQTT接続は青
+        mqttClient.loop();
+      } else {
+//        M5.dis.drawpix(0, 0xffff00);  // MQTT未接続は黄色
+        vTaskDelay(1000); // 再接続まで間隔を開ける
+      }
+    } else {
+//      M5.dis.drawpix(0, 0x00ff00);  // Wifi切断は赤（色はなぜかBRG順）
+    }
+    vTaskDelay(1); // タスク内の無限ループには必ず入れる
+  }
 }
 
 void loop() {
   unsigned long t = millis();
   M5.update();
-  checkWifi();
-  checkMQTT();
   // 500msごとに更新
   if (t - lastUpdateTime >= 500) {
     lastUpdateTime = t;
@@ -230,40 +253,42 @@ void updateLcd() {
   M5.Lcd.print(mqttClient.connected() ? "MQTT:Conn" : "MQTT:Disc");
 }
 
-void checkWifi() {
+boolean checkWifi() {
+  static int lastWiFiStatus = WL_IDLE_STATUS;
   int wifiStatus = WiFi.status();
   if (lastWiFiStatus != WL_CONNECTED && wifiStatus == WL_CONNECTED) {
-    Serial.println("WiFi connected.");
-    Serial.println("IP address: ");
-    Serial.println(WiFi.localIP());
-  } else if (lastWiFiStatus == WL_CONNECTED && wifiStatus != WL_CONNECTED) {
-    Serial.println("WiFi disconnected.");
-  }
-  lastWiFiStatus = wifiStatus;
-}
-
-void checkMQTT() {
-  // 接続が切れた際に再接続する
-  static unsigned long lastFailedTime = 0;
-  static boolean lastConnect = false;
-  unsigned long t = millis();
-  if (!mqttClient.connected()) {
-    if (lastConnect || t - lastFailedTime >= 5000) {
-      if (mqttClient.connect(mqttClientID, mqttUserName, mqttPassword)) {
-        Serial.println("MQTT Connect OK.");
-        lastConnect = true;
-        mqttClient.subscribe("roomba/in/#");
-      } else {
-        Serial.print("MQTT Connect failed, rc=");
-        // http://pubsubclient.knolleary.net/api.html#state に state 一覧が書いてある
-        Serial.println(mqttClient.state());
-        lastConnect = false;
-        lastFailedTime = t;
-      }
+    printSomewhere("WiFi connected.");
+    printSomewhere("IP address: ");
+    printSomewhere(WiFi.localIP().toString().c_str());
+  } else if (lastWiFiStatus != wifiStatus && wifiStatus != WL_CONNECTED) {
+    printSomewhere("WiFi disconnected.");
+    printSomewhere(wifiStatus);
+    if (wifiStatus == WL_CONNECT_FAILED) {
+      WiFi.begin(ssid, password);
     }
   }
-  mqttClient.loop();
+  lastWiFiStatus = wifiStatus;
+  return (wifiStatus == WL_CONNECTED);
 }
+
+boolean checkMQTT() {
+  unsigned long t = millis();
+  boolean conn = mqttClient.connected();
+  if (!conn) {
+    printSomewhere("MQTT Disconnect. Connecting...");
+    conn = mqttClient.connect(mqttClientID, mqttUserName, mqttPassword);
+    if (conn) {
+      printSomewhere("MQTT Connect OK.");
+      mqttClient.subscribe("roomba/in/#");
+    } else {
+      printSomewhere("MQTT Connect failed, rc=");
+      // http://pubsubclient.knolleary.net/api.html#state に state 一覧が書いてある
+      printSomewhere(mqttClient.state());
+    }
+  }
+  return conn;
+}
+
 String payloadToString(const byte* payload, unsigned int length) {
   char s[length + 1];
   strncpy(s, (char*)payload, length);
@@ -284,8 +309,8 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   t.remove(0, strlen("roomba/in/"));
   Serial.println(t);
   if (t.equals("drive")) {
-    // payload:コンマ区切り 例: 100,-100
-    int i = p.indexOf(",");
+    // payload:/区切り 例: 100/-100
+    int i = p.indexOf("/");
     String strL = p.substring(0, i);
     String strR = p.substring(i + 1);
     int l = strL.toInt();
@@ -350,4 +375,23 @@ void checkOISafe() {
       roomba.safe();
       delay(100);
     }
+}
+
+//-------------------------------
+//  Print for Debug
+//-------------------------------
+void initPrintSomewhere(void)
+{
+}
+void printSomewhere(int num)
+{
+  char strx[128] = {0};
+  sprintf(strx, "%d", num);
+  Serial.println(strx);
+  //M5.Lcd.printf("%s",strx);
+}
+void printSomewhere(const char* txt)
+{
+  Serial.println(txt);
+  //M5.Lcd.printf(txt);
 }
